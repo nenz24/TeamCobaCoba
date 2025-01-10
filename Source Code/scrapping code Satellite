@@ -1,0 +1,87 @@
+SENTINEL 2 
+
+
+var table = ee.FeatureCollection('FAO/GAUL/2015/level1')
+ .filter(ee.Filter.eq('ADM1_NAME', 'Bali'));
+ var table_latlng = table.geometry().centroid().coordinates();
+ var table_lat = table_latlng.get(0);
+ var table_lng = table_latlng.get(1);
+ print("Latitude : ", table_lat);
+ print("Longitude : ", table_lng);
+ var table_buffer = table.map(function(feature) {
+ return feature.buffer(1000);
+ });
+ var s2Sr = ee.ImageCollection('COPERNICUS/S2_SR')
+ .select(['B2', 'B3', 'B4', 'B8', 'B11'])
+ .map(function(img) { return img.toFloat(); });
+ var s2Clouds =
+ ee.ImageCollection('COPERNICUS/S2_CLOUD_PROBABILITY');
+ var START_DATE = ee.Date('2020-01-01');
+ var END_DATE = ee.Date('2024-12-31');
+ var MAX_CLOUD_PROBABILITY = 30;
+ var region = table;
+ function maskClouds(img) {
+ var clouds = ee.Image(img.get('cloud_mask')).select('probability');
+ var isNotCloud = clouds.lt(MAX_CLOUD_PROBABILITY);
+ return img.updateMask(isNotCloud);
+ }
+ function maskEdges(s2_img) {
+ 9
+return s2_img.updateMask(
+ s2_img.select('B8').mask().updateMask(s2_img.select('B11').mask()));
+ }
+ var criteria = ee.Filter.and(ee.Filter.bounds(region),
+ ee.Filter.date(START_DATE, END_DATE));
+ s2Sr = s2Sr.filter(criteria).map(maskEdges);
+ s2Clouds = s2Clouds.filter(criteria);
+ var s2SrWithCloudMask = ee.Join.saveFirst('cloud_mask').apply({
+ primary: s2Sr,
+ secondary: s2Clouds,
+ condition: ee.Filter.equals({leftField: 'system:index', rightField:
+ 'system:index'})
+ });
+ var processedCollection = ee.ImageCollection(s2SrWithCloudMask)
+ .map(maskClouds)
+ .map(function(image) {
+ var NDVI = image.normalizedDifference(['B8', 'B4']).rename('NDVI');
+ var NDWI =image.normalizedDifference(['B3', 'B8']).rename('NDWI');
+ var NDMI =image.normalizedDifference(['B8', 'B11']).rename('NDMI');
+ return image.addBands([NDVI, NDWI, NDMI]);
+ });
+ var monthlyIntervals = ee.List.sequence(0,
+ END_DATE.difference(START_DATE, 'month').subtract(1))
+ .map(function(month) {
+ var start = START_DATE.advance(month, 'month');
+ var end = start.advance(1, 'month');
+ return ee.Dictionary({
+ 'start': start.format('YYYY-MM-dd'),
+ 'end': end.format('YYYY-MM-dd')
+ });
+ });
+ var imagesByMonth =
+ ee.ImageCollection(monthlyIntervals.map(function(interval) {
+ var start = ee.Date(ee.Dictionary(interval).get('start'));
+ var end = ee.Date(ee.Dictionary(interval).get('end'));
+ var monthlyComposite = processedCollection.filterDate(start, end).mean();
+ return monthlyComposite.set('system:time_start', start.millis());
+ }));
+ var combinedImage = imagesByMonth.toBands()
+ 10
+.clip(table_buffer)
+ .set({
+ 'location': 'Bali',
+ 'start_date': START_DATE.format('YYYY-MM-dd'),
+ 'end_date': END_DATE.format('YYYY-MM-dd')
+ });
+ Export.image.toDrive({
+ image: combinedImage,
+ description: 'S2_monthly_average',
+ scale: 150,
+ f
+ ileFormat: 'GeoTIFF',
+ maxPixels: 1e13,
+ region: table_buffer,
+ formatOptions: {
+ cloudOptimized: true
+ }
+ });
